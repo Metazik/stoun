@@ -29,12 +29,47 @@ function writeWav(filePath, samples) {
   buffer.writeUInt32LE(dataSize, 40);
 
   for (let i = 0; i < numSamples; i++) {
-    const clamped = Math.max(-1, Math.min(1, samples[i]));
-    buffer.writeInt16LE(Math.round(clamped * 32767), 44 + i * 2);
+    // Soft-clip (tanh) instead of a hard clamp — hard clamping is what makes
+    // synthesized audio sound harsh/"digital"; tanh rounds the peaks instead.
+    const soft = Math.tanh(samples[i] * 1.15);
+    buffer.writeInt16LE(Math.round(soft * 32767), 44 + i * 2);
   }
 
   fs.writeFileSync(filePath, buffer);
   console.log("wrote", filePath, `${(buffer.length / 1024).toFixed(0)}kb`);
+}
+
+// One-pole lowpass — smooths out the harsh high-frequency edges of raw
+// sine/square synthesis so it reads as "warm" rather than "digital".
+function lowpass(buf, cutoffHz) {
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  const dt = 1 / SAMPLE_RATE;
+  const alpha = dt / (rc + dt);
+  const out = new Float32Array(buf.length);
+  out[0] = buf[0];
+  for (let i = 1; i < buf.length; i++) {
+    out[i] = out[i - 1] + alpha * (buf[i] - out[i - 1]);
+  }
+  return out;
+}
+
+// Cheap short "room" ambience via a few feedback taps — turns a completely
+// dry synth signal into something that sounds like it has space around it.
+function addRoomEcho(buf, { delaySec = 0.09, feedback = 0.28, mix = 0.22, taps = 3 } = {}) {
+  const out = Float32Array.from(buf);
+  const delaySamples = Math.round(delaySec * SAMPLE_RATE);
+  for (let tap = 1; tap <= taps; tap++) {
+    const offset = delaySamples * tap;
+    const gain = mix * Math.pow(feedback, tap - 1);
+    for (let i = offset; i < out.length; i++) {
+      out[i] += buf[i - offset] * gain;
+    }
+  }
+  return out;
+}
+
+function polish(buf) {
+  return addRoomEcho(lowpass(buf, 6500));
 }
 
 function seconds(n) {
@@ -67,13 +102,16 @@ function synthVocal(durationSec) {
     const noteT = t - noteIdx * noteLen;
     const freq = noteFreq(MELODY[noteIdx]);
     const vibrato = Math.sin(2 * Math.PI * 5.5 * t) * 0.004;
-    const env = envelope(noteT, noteLen, 0.01, 0.03, 0.75, 0.08);
-    // breathy vocal-ish timbre: fundamental + a couple of harmonics + light noise
+    // Longer attack/release than a hard on/off — reads as sung, not beeped.
+    const env = envelope(noteT, noteLen, 0.04, 0.08, 0.7, 0.22);
+    // breathy vocal-ish timbre: fundamental + a couple of gently detuned
+    // harmonics (a hint of chorus) + very light noise, weighted toward the
+    // fundamental so it doesn't buzz.
     const fundamental = Math.sin(2 * Math.PI * freq * (1 + vibrato) * t);
-    const h2 = 0.35 * Math.sin(2 * Math.PI * freq * 2 * t);
-    const h3 = 0.15 * Math.sin(2 * Math.PI * freq * 3 * t);
-    const breath = (Math.random() * 2 - 1) * 0.03;
-    out[i] = env * (fundamental + h2 + h3) * 0.5 + breath;
+    const h2 = 0.22 * Math.sin(2 * Math.PI * freq * 2.003 * t);
+    const h3 = 0.08 * Math.sin(2 * Math.PI * freq * 3.0 * t);
+    const breath = (Math.random() * 2 - 1) * 0.015;
+    out[i] = env * (fundamental + h2 + h3) * 0.55 + breath;
   }
   return out;
 }
@@ -141,8 +179,10 @@ function normalize(buf, peak = 0.92) {
 const DURATION = 16; // seconds, long enough to cut 5/10/15s clips from
 
 // 1) ORIGINAL — dry vocal only, exactly what the "artist" recorded.
-const original = synthVocal(DURATION);
-normalize(original, 0.85);
+// Lowpass only (a phone/laptop mic rolls off highs) — no room echo, so the
+// A/B contrast with the produced "Stoun version" tracks stays honest.
+let original = lowpass(synthVocal(DURATION), 9000);
+original = normalize(original, 0.85);
 writeWav(
   path.join("public/audio/demo", "original-vocal.wav"),
   original
@@ -162,8 +202,9 @@ writeWav(
     addChord(out, chords[bar % chords.length], bar * 4, 4, 0.18);
     addBass(out, chords[bar % chords.length][0], bar * 4, 4, 0.22);
   }
-  normalize(out, 0.9);
-  writeWav(path.join("public/audio/demo", "stoun-piano-soul.wav"), out);
+  const polished = polish(out);
+  normalize(polished, 0.9);
+  writeWav(path.join("public/audio/demo", "stoun-piano-soul.wav"), polished);
 }
 
 // 3) STOUN — "Afrobeat": vocal + rhythmic percussion + groove bass.
@@ -183,8 +224,9 @@ writeWav(
     addKick(out, t, 0.45);
     addHat(out, t + 0.25, 0.15);
   }
-  normalize(out, 0.92);
-  writeWav(path.join("public/audio/demo", "stoun-afrobeat.wav"), out);
+  const polished = polish(out);
+  normalize(polished, 0.92);
+  writeWav(path.join("public/audio/demo", "stoun-afrobeat.wav"), polished);
 }
 
 // 4) STOUN — "Cinematic": vocal + swelling string-pad harmony.
@@ -201,8 +243,9 @@ writeWav(
     addChord(out, chords[bar % chords.length], bar * 4, 4, 0.2);
     addBass(out, chords[bar % chords.length][0], bar * 4, 4, 0.18);
   }
-  normalize(out, 0.9);
-  writeWav(path.join("public/audio/demo", "stoun-cinematic.wav"), out);
+  const polished = polish(out);
+  normalize(polished, 0.9);
+  writeWav(path.join("public/audio/demo", "stoun-cinematic.wav"), polished);
 }
 
 // 5) Generic default "Stoun version" (used when no tag matches) — same as piano/soul mix
@@ -223,8 +266,9 @@ writeWav(
   for (let t = 0.5; t < DURATION; t += 1) {
     addHat(out, t, 0.08);
   }
-  normalize(out, 0.9);
-  writeWav(path.join("public/audio/demo", "stoun-default.wav"), out);
+  const polished = polish(out);
+  normalize(polished, 0.9);
+  writeWav(path.join("public/audio/demo", "stoun-default.wav"), polished);
 }
 
 console.log("Done generating demo audio.");
