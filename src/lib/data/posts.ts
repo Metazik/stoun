@@ -3,6 +3,7 @@ import { isSupabaseConfigured } from "@/lib/config";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import { getDemoDB } from "@/lib/demo/store";
 import { mapProfileRow } from "@/lib/data/mappers";
+import { resolveAudioUrl } from "@/lib/data/storage";
 import type { Post } from "@/types";
 
 export async function listFeedPosts(viewerId?: string): Promise<Post[]> {
@@ -33,29 +34,33 @@ export async function listFeedPosts(viewerId?: string): Promise<Post[]> {
 
   if (error || !data) return [];
 
-  return data.map((row: any) => {
-    const { data: pub } = supabase.storage
-      .from(row.audio_files.storage_bucket)
-      .getPublicUrl(row.audio_files.storage_path);
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      authorId: row.author_id,
-      author: mapProfileRow(row.profiles),
-      title: row.title,
-      description: row.description,
-      artworkUrl: row.artwork_url,
-      clipDurationSeconds: row.clip_duration_seconds,
-      audioUrl: pub.publicUrl,
-      hashtags: row.hashtags ?? [],
-      remixOfPostId: row.remix_of_post_id,
-      likeCount: row.likes?.length ?? 0,
-      commentCount: row.comments?.length ?? 0,
-      remixCount: row.remixes?.length ?? 0,
-      likedByMe: viewerId ? row.likes?.some((l: any) => l.user_id === viewerId) : false,
-      createdAt: row.created_at,
-    } satisfies Post;
-  });
+  return Promise.all(
+    data.map(async (row: any) => {
+      const audioUrl = await resolveAudioUrl(
+        supabase,
+        row.audio_files.storage_bucket,
+        row.audio_files.storage_path
+      );
+      return {
+        id: row.id,
+        projectId: row.project_id,
+        authorId: row.author_id,
+        author: mapProfileRow(row.profiles),
+        title: row.title,
+        description: row.description,
+        artworkUrl: row.artwork_url,
+        clipDurationSeconds: row.clip_duration_seconds,
+        audioUrl,
+        hashtags: row.hashtags ?? [],
+        remixOfPostId: row.remix_of_post_id,
+        likeCount: row.likes?.length ?? 0,
+        commentCount: row.comments?.length ?? 0,
+        remixCount: row.remixes?.length ?? 0,
+        likedByMe: viewerId ? row.likes?.some((l: any) => l.user_id === viewerId) : false,
+        createdAt: row.created_at,
+      } satisfies Post;
+    })
+  );
 }
 
 export async function getPost(postId: string, viewerId?: string): Promise<Post | null> {

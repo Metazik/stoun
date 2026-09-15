@@ -2,6 +2,7 @@
 import { isSupabaseConfigured } from "@/lib/config";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import { getDemoDB } from "@/lib/demo/store";
+import { resolveAudioUrl, LOCAL_ASSET_BUCKET } from "@/lib/data/storage";
 import type {
   AudioFile,
   MusicSettings,
@@ -153,8 +154,8 @@ export async function getAudioFile(audioFileId: string): Promise<AudioFile | nul
   if (!supabase) return null;
   const { data } = await supabase.from("audio_files").select("*").eq("id", audioFileId).single();
   if (!data) return null;
-  const { data: pub } = supabase.storage.from(data.storage_bucket).getPublicUrl(data.storage_path);
-  return mapAudioFileRow(data, pub.publicUrl);
+  const url = await resolveAudioUrl(supabase, data.storage_bucket, data.storage_path);
+  return mapAudioFileRow(data, url);
 }
 
 export async function updateProjectSettings(
@@ -221,8 +222,8 @@ export async function saveGeneratedAudioFile(
       project_id: projectId,
       kind: "processed",
       label,
-      storage_bucket: "public-posts",
-      storage_path: url.replace(/^\//, ""),
+      storage_bucket: LOCAL_ASSET_BUCKET,
+      storage_path: url,
       is_mocked: true,
     })
     .select("*")
